@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<style>
+
+
+.bold_text {
+  font: bold 48px monospace;
+}
+
+.ball {
+  fill: steelblue;
+  stroke-width: 0;
+  stroke: none;
+  fill-opacity: 0.1;
+
+}
+
+.dot {
+  fill: black;
+  stroke-width: 0;
+  stroke: none;
+  fill-opacity: 1.0;
+
+}
+
+ 
+.edge {
+  fill: none;
+  stroke-width: 0.5;
+  stroke: black;
+  fill-opacity: 0.3;
+}
+
+
+
+form {
+  margin-left: 40px;
+  margin-top: 20px;
+  padding-right: 40px;
+  margin-bottom: 20px;
+}
+
+button {
+  margin-left: 20px;
+  margin-right:20px;
+}
+
+
+</style>
+<body>
+	<form oninput="output.value = input.value" style="top:10px;left:10px;">
+		<input type="checkbox" id="curve_checkbox" value="show">Show Sampled Curve
+		<button id= "sample" type='button'>Sample</button>
+		<input id="noise-number" type="range" min="0" max="50" value="20" style="width:50;">
+			<label>Noise</label>
+		<button id= "betti1_button" type='button'>Compute &#946;<sub>1</sub></button> 
+		<br> <br>
+		<input id="sample-number" type="range" min="0" max="55" value="40" style="width:50;">
+			<label>Number of points</label>
+		<input id="input" type="range" min="0" max="150" value="2" style="width:240px;">
+			<i>Radius</i> = <output name="output" for="input">2</output>
+	</form>
+	<form>
+		<label for="curves">Objects</label>
+		<select id="curves"></select><br>
+	</form>
+</body>
+
+
+<script type="text/javascript" src="http://mbostock.github.com/d3/d3.js"></script>
+<script>
+
+/**
+* Author: Brooks Mershon
+* November 23, 2014
+* Version 3
+*
+* Created as part of a project for MATH 412: Topology with Applications taught at Duke University.
+*
+* Copyright (c) 2014 Brooks Mershon
+* The MIT License - http://opensource.org/licenses/MIT
+*
+*
+**/
+
+(function() {
+	/**
+	* Set up margins, SVG
+	* Define curves
+	* Define event-handlers for user inputs
+	*/
+	var margin = {top: 20, right: 20, bottom: 20, left: 20},
+	    padding = {top: 60, right: 60, bottom: 60, left: 60},
+	    outerWidth = 960,
+	    outerHeight = 500,
+	    innerWidth = outerWidth - margin.left - margin.right,
+	    innerHeight = outerHeight - margin.top - margin.bottom,
+	    width = innerWidth - padding.left - padding.right,
+	    height = innerHeight - padding.top - padding.bottom;
+
+
+  if (self.frameElement) self.frameElement.style.height = 800 + "px";
+
+	var svg = d3.select("body").append("svg")
+    	.attr("width", outerWidth)
+    	.attr("height", outerHeight)
+    	.append("g")
+    	.attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+
+   	// color scale for "heatmap" indicating the time at which particular triangles are introduced using fill color
+	var color = d3.scale.linear()
+	      .domain([0, 40, 60, 75, 100, 150])
+	      .range(["#0a0", "#6c0", "#ee0", "#eb4", "#eb9", "#fff"]);
+
+
+	/**
+	* Path to sample from
+	**/
+
+	var epsilon_noise = 20,
+	    n = 55;
+
+	var curves, curveNames;
+
+	d3.tsv("curves.txt", function(data) {
+		curves = data.map(function(d) {return d.d});
+
+
+		var path = svg.append("path")
+    		.attr("d", curves[0]);
+
+		path
+			.attr("id", "squiggle")
+			.attr("stroke", "black")
+			.attr("stroke-opacity", 0.0)
+			.attr("stroke-width", 2)
+			.attr("fill", "none")
+
+		curveNames = data.map(function(d) {return d.name});
+
+		d3.select("#curves")
+			.on("change", change)
+				.selectAll("option")
+				.data(curveNames)
+		  .enter().append("option")
+		    .attr("value", function(d) { return d; })
+		    .text(function(d) { return d; });
+
+		sample();
+	})
+
+
+	/*
+		Add legend for triangle coloring
+	*/
+
+	var legend = svg.selectAll(".legend")
+	      .data(color.ticks(6).slice(1).reverse())
+	    .enter().append("g")
+	      .attr("class", "legend")
+	      .attr("transform", function(d, i) { return "translate(" + (width) + "," + (100 + i * 20) + ")"; });
+
+	  legend.append("rect")
+	      .attr("width", 20)
+	      .attr("height", 20)
+	      .style("fill", color);
+
+	  legend.append("text")
+	      .attr("x", 26)
+	      .attr("y", 10)
+	      .attr("dy", ".35em")
+	      .text(String);
+
+	  svg.append("text")
+	      .attr("class", "label")
+	      .attr("x", width)
+	      .attr("y", 80)
+	      .attr("dy", ".35em")
+	      .text("Radius");
+
+
+ 	var betti_numbers = ["?", "?"]; // data to be displayed to user with svg: text
+
+	d3.select("#input").on("input", function() { update(this.value); });
+	d3.select("#sample").on("click", function() { sample(); });
+	d3.select("#curve_checkbox").on("change", function() { checkboxUpdate(this.checked)})
+	d3.select("#sample-number").on("input", function() { n = this.value; sample();});
+	d3.select("#betti1_button").on("click", function() { updateBetti1() });
+	d3.select("#noise-number").on("input", function() { epsilon_noise = this.value; sample();});
+
+
+
+	var data = [],
+		vertices = [];
+		edges = [],
+		triangles = [],
+		simplices = [],
+		edge_values = [],
+		triangle_values = [];
+
+	function sample() {
+
+		d3.selectAll(".dot").remove();
+		d3.selectAll(".ball").remove();
+
+		var pathNode = svg.select("#squiggle").node();
+		var pathLength = pathNode.getTotalLength(); 
+		
+
+		var gaussianNoise = d3.random.normal(0, epsilon_noise)
+
+
+		data = d3.range(n).map(function() {
+			var p = pathNode.getPointAtLength(Math.random()*pathLength)
+				return [p.x + gaussianNoise(), p.y + gaussianNoise()];
+		});
+
+		vertices = d3.range(n); // first vertex is "0"
+
+		var dot = svg.selectAll("dot")
+			.data(data)
+			.enter().append("circle")
+
+
+		dot
+			.attr("class", "dot")
+			.attr("cx", function(d) {return d[0]})
+			.attr("cy", function(d) {return d[1]})
+			.attr("r", 2);
+
+
+		var circle = svg.selectAll("ball")
+			.data(data)
+			.enter().append("circle");
+
+
+		circle
+			.attr("class", "ball")
+			.attr("cx", function(d) {return d[0]})
+			.attr("cy", function(d) {return d[1]})
+			.attr("r", 1); 
+
+		update();
+	}
+
+
+	function indexOfPoint(array, point) {
+		var epsilon = 0.0000001;
+		var index = -1;
+
+		var length = array.length;
+		for(var i = 0; i < length; i++) {
+			var current = array[i];
+			if(Math.abs(point[0] - current[0]) < epsilon && Math.abs(point[1] - current[1]) < epsilon){
+				index = i;
+				break;
+			}
+		}
+		return index;
+	}
+
+	function indexOfEdge(array, edge){
+		var index = -1;
+
+		var length = array.length;
+		for(var i = 0; i < length; i++) {
+			var current = array[i];
+			if(edge[0] == current[0] && edge[1] == current[1]){
+				index = i;
+				break;
+			}
+		}
+		return index;
+	}
+
+
+	/*
+		array contains delauney triangles, where each triple is a triple of vertex indices
+	*/
+	function indexOfTriangle(array, triangle){
+		var index = -1; 
+
+		var length = array.length;
+		for(var i = 0; i < length; i++) { //for each triple in delaunay triangulation
+			var current = array[i]; //a triple ex) [1, 4, 0], indices refer to vertices
+			var count = 0;
+			if(current.indexOf(triangle[0]) > -1 && current.indexOf(triangle[1]) > -1 && current.indexOf(triangle[2]) > -1){
+				index = i;
+			}
+		}
+		return index;
+	}
+
+	function update(radius) {
+
+		simplices = [];
+		edges = [];
+		triangles = [];
+
+		svg.selectAll(".edge").remove();
+		svg.selectAll(".triangle").remove();
+
+
+		var circle = d3.selectAll(".ball")
+		        .attr("r", radius)
+
+
+		/*
+			Compute Delaunay triangulation, using this triangulation as a limiter, so that triangles are only added to the rips-complex if
+			they are present in the Delaunay triangulation
+		*/
+
+		var delaunay = d3.geom.delaunay(data); // data looks like: [[[100, 150], [200, 190], [300, 350]], [] ...]
+
+		var delaunayEdges = [];
+
+		var delaunayVertices = delaunay.slice(0);
+
+		var delaunayLength = delaunay.length;
+		for(var i = 0; i < delaunayLength; i++){
+			for(var k = 0; k < 3; k++){
+				var p = delaunay[i][k];
+				delaunay[i][k] = indexOfPoint(data, p); // replace [coordinate_x, coordinate_y, coordinate_z] with [index_x, index_y, index_z]
+			}
+			var triple = delaunay[i];
+			delaunayEdges.push([triple[0], triple[1]]);
+			delaunayEdges.push([triple[0], triple[2]]);
+			delaunayEdges.push([triple[1], triple[2]]);
+		}
+
+
+		/*
+		  Check pair-wise distances, adding an edge between points if their balls encompass them AND the edge is in the Delaunay triangulation
+		*/
+
+		var dataLength = data.length;
+		for(var i = 0; i < dataLength; i++) {
+			for(var j = i+1; j < dataLength; j++) {
+				var distance = distanceBetween(data[i], data[j]);
+				if(radius >= distance/2 && (indexOfEdge(delaunayEdges, [i, j]) > -1 || indexOfEdge(delaunayEdges, [j, i]) > -1)) {
+					svg.append("line")
+						.attr("class", "edge")
+						.attr("x1", data[i][0])
+						.attr("x2", data[j][0])
+						.attr("y1", data[i][1])
+						.attr("y2", data[j][1]);
+					edges.push([[i, j], distance/2]); // add a simplex
+					edge_values.push(radius/2);
+				}
+		  	}
+		}
+
+		
+		/*
+		  Check triples of edges in array containing edges for triangles
+		  the faces of a triangles are indices of its three edges, which will be filled in after all simplices are sorted
+		*/
+
+		for(var i = 0; i < dataLength; i++) {
+			for(var j = i+1; j < dataLength; j++) {
+				for(var k = j+1; k < dataLength; k++) {
+					var max = Math.max(distanceBetween(data[j], data[k]), Math.max(distanceBetween(data[i], data[j]), distanceBetween(data[i], data[k])));
+					if(indexOfTriangle(delaunay, [i, j, k]) > -1 && radius >= max/2) { //check if triple of vertices forms a Delaunay triangle
+						var string = data[i][0] + "," + data[i][1] + ", " + data[j][0] + "," + data[j][1] + ", " + data[k][0] + "," + data[k][1]; 
+						svg.append("polygon")
+							.attr("class", "triangle")
+							.attr("points", string)
+							.attr("fill", color(max/2)) // heatmap for triangles, colored to represent the radius at which they are introduced
+							.attr("fill-opacity", 1)
+							.attr("stroke", "black")
+							.attr("stroke-width", "0.5px")
+					  	triangles.push([[i, j, k], max/2]); // add a simplex
+					}
+				}
+		   
+			}
+		}
+
+		simplices = simplices.concat(edges).concat(triangles); // does not include vertices
+
+        /*
+            Sort simplices:
+            break ties with lower dimension simplices coming first
+        */
+        simplices.sort(function(a, b) {
+            var diff = greatestEdgeLength(a) - greatestEdgeLength(b);
+            return (diff == 0) ? (a[0].length - b[0].length) : diff;
+        })
+
+
+
+        // format simplices so they are of the form:
+        // triangle [edge, edge, edge], edge: [vertex, vertex] 
+        for(var i = 0; i < simplices.length; i++){
+        	simplices[i] = simplices[i][0].slice(0);
+        }
+
+        //format edges
+
+        for(var i = 0; i < edges.length; i++){
+        	edges[i] = edges[i][0].slice(0);
+        }
+
+
+        simplices = vertices.concat(simplices);
+
+        /*
+			replace triangle information (inclued vertices) with 1-dimensional (edge) faces
+        */
+
+        var simplicesLength = simplices.length;
+        var verticesLength = vertices.length;
+        for(var i = 0; i < simplicesLength; i++) {
+        	if(simplices[i].length == 3) { //triangle
+        		var t = simplices[i];
+
+        		// define three faces of triangles
+        		var faces = [[t[0], t[1]], [t[0], t[2]],[t[1], t[2]]];
+        		for(var k = 0; k < 3; k++){
+        			for(var j = verticesLength; j < i; j++) { //start at first edge
+        				var edge = simplices[j];
+	        			if(simplices[j].length == 2 && faces[k][0] == edge[0] && faces[k][1] == edge[1]) {
+	        				simplices[i][k] = j; // the kth face of the triangle is the simplex (an edge) at index j
+	        			}
+        			}
+        		}
+        		
+        	}
+        }
+
+        updateBetti0();
+	}
+
+	function updateBetti0() {
+		// all vertices born at zero
+
+		var immortal_pairs = findBirthDeathPairs(d3.range(n), edges, d3.range(n).map(function() {return 0}), edge_values)[1];
+		betti_numbers[0] = immortal_pairs.length;
+		updateText();
+
+	}
+
+	function updateBetti1() {
+
+  		d3.select("body").style("background-color", "#f5f5f5");
+		var warning  = svg.append("text")
+			.attr("id", "warning")
+			.attr("x", 200)
+			.attr("y", 200)
+			.style("font-size", "50px")
+			.text("Computing...")
+
+
+		setTimeout(function(){
+		    var info = runRipsAlgorithm();
+			var loops = info[0];
+			betti_numbers[1] = loops;
+			updateText();
+			svg.select("#warning").remove();
+			d3.select("body").style("background-color", "white");
+
+		}, 200);
+		
+	}
+
+
+	function updateText() {
+		var text = svg.selectAll(".bettiText")
+				   		.data(betti_numbers);
+
+		text.enter().append("text")
+			.attr("x", function(d, i) { return width - 150; })
+			.attr("y", function(d, i) { return 100 + i* 60 })
+			.attr("dy", ".35em")
+			.style("font-size","34px");
+
+
+		var subscripts = ["₀","₁"];
+		text.text(function(d, i) { return "\u03B2" + subscripts[i] + " = " + d; }) // isn't that fancy?
+			.attr("class", "bettiText");
+	}
+
+	function change() {
+		d3.select("path").attr("d", curves[curveNames.indexOf(this.value)]);
+		sample();
+	}
+
+	function greatestEdgeLength(t) {
+		return t[1];
+	}
+
+	function distanceBetween(a, b) {
+		return Math.sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]));
+	}
+
+	function checkboxUpdate(checked) {
+		svg.select("#squiggle")
+	    		.attr("stroke-opacity", function(d) { return (checked) ? 0.2 : 0.0});
+	}
+
+
+	/**
+	 * finds birth/death pairs for given vertices, edges, and function values
+	 * Union-Find
+	 * @return {[[finite_pairs], [immortal births]]}
+	 */
+    function findBirthDeathPairs(vertices, edges, F, H) {
+        // edges should come in in order of their greatest endpoint f-value
+
+        edges.sort(function (a, b) {
+            var diff = H[a] - H[b];
+        });
+
+        var u = [],
+            pairs = [],
+            immortal_pairs = [];
+        /*
+           Fill vector v with all points. Each point is it's own component initially.
+         */
+        var verticesLength = vertices.length;
+        for(var i = 0; i < verticesLength; i++) {
+            u.push(i);
+        }
+
+        var edgesLength = edges.length;
+        for(var j = 0; j < edgesLength; j++) {
+
+            var e = edges[j],
+                a = e[0], //initial vertex of edge
+                b = e[1]; //final vertex of edge
+
+            while (a != u[a]) {a = u[a]};
+            while (b != u[b]) {b = u[b]};
+
+            if(a < b) {
+                u[b] = a;
+            } else if (a > b) {
+                u[a] = b;
+            }
+
+			pairs.push([0, H[j]]); // [f(vertex a, f(edge)]
+
+        }
+
+        var uLength = u.length;
+        // Find dots of infinite persistence, tag them as dying at -1
+        for(var i = 0; i < uLength; i++) {
+            if(u[i] == i) {
+                immortal_pairs.push([F[i],-1, i])
+            }
+        }
+        return [pairs, immortal_pairs];
+    }
+
+    /*
+		Return information about 1-diagram: [num loops, [pairs]];
+    */
+    function runRipsAlgorithm() {
+
+    	var matrix = [],
+    	 	edgesAndTriangles = simplices.slice(0), // includes vertices to produce square matrix - the naive implementaition
+    		verticesLength = vertices.length;
+
+    	// boundary matrix has columns of the usal matrix as each element in the array.
+    	var boundary_matrix = [];
+    	var edgesAndTrianglesLength = edgesAndTriangles.length;
+    	for(var j = 0; j < edgesAndTrianglesLength; j++) { // build up columns
+    		var column = [];
+    		var simplex = simplices[j]; // edge or a triangle, length 2 or length 3
+    		for(var i = 0; i < simplices.length; i++) { // all vertices, edges, triangles
+    			if(simplex.length == 2 && (simplex[0] == i || simplex[1] == i)){ //edge contains face i (a vertex)
+    				column.push(1);
+    			} else if(simplex.length == 3 && (simplex[0] == i || simplex[1] == i || simplex[2] == i)) { //triangle contains face i (an edge)
+    				column.push(1);
+    			} else {
+    				column.push(0);
+    			}
+
+    		}
+    		boundary_matrix.push(column);
+    	}
+
+    	reduced = reduce(boundary_matrix);
+
+    	var lowestArray = getLowestArray(reduced);
+    	var lowestArrayLength = lowestArray.length;
+
+    	var pairs = [];
+
+    	var reducedLength = reduced.length;
+    	for(var j = verticesLength; j < reducedLength; j++){
+    		if(reduced[j].indexOf(1) < 0) { //zero-column: a cycle is born at j
+    			var pair = [j, -1]; // default is a cycle born at simplex-j, dead at infinity
+    			for(var k = 0; k < lowestArrayLength; k++){ //scan low-array for first lowest-'1' in j'th row
+    				if(lowestArray[k] == j) { // cycle dead at k (first lowest 1 encountered in jth row)
+    					pair[1] = k;
+    					break;
+    				}
+    			}
+    			pairs.push(pair);
+    		}
+    	}
+
+    	/*
+    		Count number of immortal pairs. This is Betti-1
+    	*/
+    	var numLoops = 0;
+    	for(var i = 0; i < pairs.length; i++){
+    		if(pairs[i][1] == -1){
+    			numLoops++;
+    		}
+    	}
+    	return [numLoops, pairs];
+    }
+
+    /*
+    	matrix is a boundary 0-1 matrix where each 1 or 0  is accessed with matrix[column][row] := element
+    	note: each elementin matrix is a column (not a row)
+
+    	Return reduced data structure using lowest-1 algorithm
+    */
+    function reduce(matrix) {
+
+    	var reducedMatrix = matrix.slice(0);
+    	var reducedMatrixLength = reducedMatrix.length;
+
+    	var currentIndex = 1;
+
+    	while(currentIndex < reducedMatrixLength) {
+
+    		var counter = currentIndex; //if we reach 0, we have no conflicts to the left of the current column
+    		
+    		for(var j = 0; j < currentIndex; j++){
+
+    			var lowestArray = getLowestArray(reducedMatrix);
+
+    			if(lowestArray[j] == lowestArray[currentIndex] && lowestArray[j] != -1){
+    				for(var p = 0; p < reducedMatrixLength; p++){ // add two columns
+    					reducedMatrix[currentIndex][p] = reducedMatrix[j][p] ^ reducedMatrix[currentIndex][p];
+    				}
+    			} else {
+    				counter--;
+    			}
+    		}
+
+    		if (counter == 0) {
+    			currentIndex++;
+    		}
+    	}
+
+    	return reducedMatrix;
+    	
+    }
+
+    /*
+    	Return array containing, for each column in boundary array, the lowest-'1' in each column
+    */
+    function getLowestArray(m){
+
+    	var low = [];
+    	for(var col = 0; col < m.length; col++) {
+    		low.push(m[col].lastIndexOf(1));
+    	}
+
+    	return low;
+    }
+    
+})();
+</script>
